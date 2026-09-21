@@ -1,3 +1,4 @@
+import hashlib
 import json
 from urllib.parse import urlparse
 
@@ -74,9 +75,7 @@ class ConnectDiscoveryInfoView(OIDCOnlyMixin, View):
             if oauth2_settings.OIDC_RP_INITIATED_LOGOUT_ENABLED:
                 end_session_endpoint = "{}{}".format(host, reverse("oauth2_provider:rp-initiated-logout"))
 
-        signing_algorithms = [Application.HS256_ALGORITHM]
-        if oauth2_settings.OIDC_RSA_PRIVATE_KEY:
-            signing_algorithms = [Application.RS256_ALGORITHM, Application.HS256_ALGORITHM]
+        signing_algorithms = self.get_signing_algorithms()
 
         validator_class = oauth2_settings.OAUTH2_VALIDATOR_CLASS
         validator = validator_class()
@@ -106,6 +105,29 @@ class ConnectDiscoveryInfoView(OIDCOnlyMixin, View):
         response = JsonResponse(data)
         response["Access-Control-Allow-Origin"] = "*"
         return response
+
+    @staticmethod
+    def get_signing_algorithms():
+        """
+        Compute the JWT signing algorithms advertised as
+        ``id_token_signing_alg_values_supported`` in the discovery document.
+
+        An algorithm is advertised only if the server is configured to support
+        it (``RS256`` requires ``OIDC_RSA_PRIVATE_KEY``) and at least one
+        registered Application is configured to use it, so that the advertised
+        algorithms stay consistent with the algorithms actually used for
+        signing ID Tokens. When no Applications are registered, or none of the
+        configured algorithms can be served, the server's capabilities are
+        advertised.
+        """
+        server_supported = [Application.HS256_ALGORITHM]
+        if oauth2_settings.OIDC_RSA_PRIVATE_KEY:
+            server_supported.insert(0, Application.RS256_ALGORITHM)
+        configured = set(Application.objects.values_list("algorithm", flat=True).distinct())
+        if not configured:
+            return server_supported
+        algorithms = [algorithm for algorithm in server_supported if algorithm in configured]
+        return algorithms or server_supported
 
 
 @method_decorator(login_not_required, name="dispatch")
@@ -150,11 +172,64 @@ class UserInfoView(OIDCOnlyMixin, OAuthLibMixin, View):
         return self._create_userinfo_response(request)
 
     def _create_userinfo_response(self, request):
+        error_response = self._validate_userinfo_access_token(request)
+        if error_response is not None:
+            return error_response
         url, headers, body, status = self.create_userinfo_response(request)
         response = HttpResponse(content=body or "", status=status)
 
         for k, v in headers.items():
             response[k] = v
+        return response
+
+    @staticmethod
+    def _extract_access_token(request):
+        """
+        Extract the bearer token from the request per RFC 6750.
+        """
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        if auth_header.startswith("Bearer "):
+            return auth_header[len("Bearer ") :].strip()
+        if request.method == "POST":
+            return request.POST.get("access_token")
+        return None
+
+    def _validate_userinfo_access_token(self, request):
+        """
+        Defensively validate the Access Token presented to the UserInfo endpoint.
+
+        OpenID Connect Core 1.0, Section 5.3 requires that the UserInfo Endpoint
+        validates the Access Token and only returns Claims about the End-User
+        the token was issued to. Returns an error response if the token fails
+        validation, or None if the request may proceed.
+        """
+        token = self._extract_access_token(request)
+        if not token:
+            # Let oauthlib produce the standard error response.
+            return None
+        AccessToken = get_access_token_model()
+        token_checksum = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        access_token = (
+            AccessToken.objects.select_related("user").filter(token_checksum=token_checksum).first()
+        )
+        if access_token is None:
+            if oauth2_settings.RESOURCE_SERVER_INTROSPECTION_URL:
+                # Tokens issued by an external authorization server are not
+                # stored locally; defer validation to oauthlib/introspection.
+                return None
+            return self._bearer_error_response(401, "invalid_token")
+        if access_token.is_expired() or access_token.user_id is None:
+            return self._bearer_error_response(401, "invalid_token")
+        if "openid" not in access_token.scopes:
+            # RFC 6750, Section 3.1: the token does not grant the openid scope.
+            return self._bearer_error_response(403, "insufficient_scope")
+        return None
+
+    @staticmethod
+    def _bearer_error_response(status, error):
+        body = json.dumps({"error": error})
+        response = HttpResponse(body, status=status, content_type="application/json")
+        response["WWW-Authenticate"] = f'Bearer realm="userinfo", error="{error}"'
         return response
 
 

@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [unreleased]
 
+### Security
+* Harden the OIDC `UserInfoView` to defensively validate the presented Access Token per
+  OpenID Connect Core 1.0 Section 5.3: expired tokens and tokens not bound to a user are
+  rejected with `401 invalid_token`, tokens without the `openid` scope are rejected with
+  `403 insufficient_scope`, and `get_userinfo_claims` verifies that the Access Token
+  belongs to the user whose Claims are returned.
+
 ### Deprecated
 * Deprecate the `AUTHENTICATION_SERVER_EXP_TIME_ZONE` setting. Token introspection `exp` values are
   Unix timestamps and are always interpreted as UTC per RFC 7662/RFC 7519. The setting still works
@@ -22,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release.
 
 ### Fixed
+* OIDC discovery `id_token_signing_alg_values_supported` now only advertises signing algorithms
+  that are both supported by the server and configured on at least one registered Application,
+  so the discovery document stays consistent with the algorithms actually used for signing.
+* Omit claims with a `None` value from ID Tokens and UserInfo responses per OpenID Connect
+  Core 1.0 Section 5.1, preventing JWT serialization errors when a claim cannot be produced.
 * #1594 Fix introspection token expiry handling to consistently use UTC and avoid the deprecated
   `datetime.utcfromtimestamp`.
 * #1696 Fix `auth_time` in oauth2 validator when user has never logged in.

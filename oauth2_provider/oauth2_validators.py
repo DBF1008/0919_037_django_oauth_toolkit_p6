@@ -885,7 +885,13 @@ class OAuth2Validator(RequestValidator):
 
         for k, v in data.items():
             if not self.oidc_claim_scope or self.oidc_claim_scope.get(k) in request.scopes:
-                claims[k] = v(request) if callable(v) else v
+                value = v(request) if callable(v) else v
+                # OpenID Connect Core 1.0, Section 5.1: Claims with no value
+                # SHOULD be omitted from the Claims set rather than being
+                # present with a null value. Omitting them also prevents JWT
+                # serialization errors when a claim cannot be produced.
+                if value is not None:
+                    claims[k] = value
         return claims
 
     def get_id_token_dictionary(self, token, token_handler, request):
@@ -1054,7 +1060,29 @@ class OAuth2Validator(RequestValidator):
         current user's claims.
 
         """
+        self._validate_userinfo_token_user_binding(request)
         return self.get_oidc_claims(request.access_token, None, request)
+
+    @staticmethod
+    def _validate_userinfo_token_user_binding(request):
+        """
+        Verify that the Access Token used for a UserInfo request is valid and
+        belongs to the user whose Claims are being returned, as required by
+        OpenID Connect Core 1.0, Section 5.3.
+        """
+        access_token = getattr(request, "access_token", None)
+        user = getattr(request, "user", None)
+        if (
+            access_token is None
+            or user is None
+            or not getattr(user, "is_authenticated", False)
+            or access_token.user_id is None
+            or access_token.user_id != user.pk
+            or access_token.is_expired()
+        ):
+            raise errors.InvalidTokenError(
+                description="The access token does not belong to the requesting user."
+            )
 
     def get_additional_claims(self, request):
         return {}

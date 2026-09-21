@@ -311,6 +311,13 @@ the claim data:
 
 Standard claim ``sub`` is included by default, to remove it override ``get_claim_dict``.
 
+Claims whose value is ``None`` are omitted from ID Tokens and ``UserInfo``
+responses, per `OpenID Connect Core 1.0, Section 5.1
+<https://openid.net/specs/openid-connect-core-1_0.html#StandardClaims>`_ which
+states that claims with no value SHOULD be omitted rather than sent with a
+null value. This also prevents JWT serialization errors when a claim cannot
+be produced for a user (for example an empty email or profile field).
+
 Supported claims discovery
 --------------------------
 
@@ -429,6 +436,12 @@ discovery information to OIDC clients, telling them the JWT issuer to use, the
 location of the JWKs to verify JWTs with, the token and userinfo endpoints to
 query, and other details.
 
+The ``id_token_signing_alg_values_supported`` value only advertises algorithms
+that the server can actually serve: ``RS256`` requires the
+``OIDC_RSA_PRIVATE_KEY`` setting, and an algorithm is only listed if at
+least one registered :term:`Client` (Application) is configured to use it.
+When no Applications are registered, the server's capabilities are advertised.
+
 
 JwksInfoView
 ~~~~~~~~~~~~
@@ -442,6 +455,14 @@ UserInfoView
 
 Available at ``/o/userinfo/``, this view provides extra user details. You can
 customize the details included in the response as described above.
+
+Per `OpenID Connect Core 1.0, Section 5.3
+<https://openid.net/specs/openid-connect-core-1_0.html#UserInfo>`_, the view
+validates the presented Access Token before returning any Claims: expired
+tokens and tokens not bound to a user are rejected with a ``401``
+``invalid_token`` response, tokens without the ``openid`` scope are rejected
+with a ``403`` ``insufficient_scope`` response, and the Claims returned are
+verified to belong to the user the Access Token was issued to.
 
 
 RPInitiatedLogoutView
