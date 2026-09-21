@@ -311,6 +311,16 @@ the claim data:
 
 Standard claim ``sub`` is included by default, to remove it override ``get_claim_dict``.
 
+.. note::
+
+    Claims whose value is ``None`` (for example an empty ``email`` or
+    ``profile`` field on the user) are omitted from the ID token and from
+    ``UserInfo`` responses entirely, rather than being serialized as ``null``.
+    This follows `OpenID Connect Core 1.0 section 5.1`_, which recommends
+    leaving out Claims that are not available.
+
+.. _OpenID Connect Core 1.0 section 5.1: https://openid.net/specs/openid-connect-core-1_0.html#StandardClaims
+
 Supported claims discovery
 --------------------------
 
@@ -429,6 +439,13 @@ discovery information to OIDC clients, telling them the JWT issuer to use, the
 location of the JWKs to verify JWTs with, the token and userinfo endpoints to
 query, and other details.
 
+The ``id_token_signing_alg_values_supported`` metadata only advertises
+algorithms that are both supported by the server configuration and actually
+configured on at least one :term:`Client` (Application), so that the
+discovery document stays consistent with the algorithms used to sign ID
+tokens. When no Application exists yet, all server-supported algorithms are
+advertised.
+
 
 JwksInfoView
 ~~~~~~~~~~~~
@@ -442,6 +459,11 @@ UserInfoView
 
 Available at ``/o/userinfo/``, this view provides extra user details. You can
 customize the details included in the response as described above.
+
+As a defensive measure, if the request also carries an authenticated browser
+session, the supplied access token must belong to the same user as the
+session; otherwise the view responds with ``403 Forbidden`` instead of
+returning another user's claims.
 
 
 RPInitiatedLogoutView

@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `datetime.utcfromtimestamp`.
 * #1696 Fix `auth_time` in oauth2 validator when user has never logged in.
 * #1603 Honor user-overridden `OIDC_SERVER_CLASS` when `OIDC_ENABLED` is `True` and `OAUTH2_SERVER_CLASS` is not explicitly set; previously only the default was used in this fallback path.
+* Fix `UserInfoView` to reject requests whose access token belongs to a different user than the
+  authenticated session, responding with `403 Forbidden`.
+* Fix `ConnectDiscoveryInfoView` to advertise only the ID token signing algorithms that are both
+  supported by the server and configured on at least one Application.
+* Fix ID token and UserInfo claim generation to omit claims with `None` values (e.g. empty email or
+  profile fields) instead of failing JWT serialization with a 500 error.
 
 
 ## [3.3.0] - 2025-05-21

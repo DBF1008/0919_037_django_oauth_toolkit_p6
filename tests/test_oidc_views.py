@@ -12,7 +12,12 @@ from oauth2_provider.exceptions import (
     InvalidOIDCClientError,
     InvalidOIDCRedirectURIError,
 )
-from oauth2_provider.models import get_access_token_model, get_id_token_model, get_refresh_token_model
+from oauth2_provider.models import (
+    get_access_token_model,
+    get_application_model,
+    get_id_token_model,
+    get_refresh_token_model,
+)
 from oauth2_provider.oauth2_validators import OAuth2Validator
 from oauth2_provider.settings import oauth2_settings
 from oauth2_provider.views.oidc import RPInitiatedLogoutView, _load_id_token, _validate_claims
@@ -146,6 +151,44 @@ class TestConnectDiscoveryInfoView(TestCase):
         self.expect_json_response_with_rp_logout("http://testserver/o")
 
     def test_get_connect_discovery_info_without_rsa_key(self):
+        self.oauth2_settings.OIDC_RSA_PRIVATE_KEY = None
+        response = self.client.get(reverse("oauth2_provider:oidc-connect-discovery-info"))
+        self.assertEqual(response.status_code, 200)
+        assert response.json()["id_token_signing_alg_values_supported"] == ["HS256"]
+
+    def _create_application(self, name, algorithm):
+        Application = get_application_model()
+        return Application.objects.create(
+            name=name,
+            redirect_uris="http://example.org",
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
+            algorithm=algorithm,
+        )
+
+    def test_get_connect_discovery_info_signing_algorithms_reflect_configured_applications(self):
+        Application = get_application_model()
+        self._create_application("HS256 App", Application.HS256_ALGORITHM)
+        response = self.client.get(reverse("oauth2_provider:oidc-connect-discovery-info"))
+        self.assertEqual(response.status_code, 200)
+        assert response.json()["id_token_signing_alg_values_supported"] == ["HS256"]
+
+        self._create_application("RS256 App", Application.RS256_ALGORITHM)
+        response = self.client.get(reverse("oauth2_provider:oidc-connect-discovery-info"))
+        self.assertEqual(response.status_code, 200)
+        assert response.json()["id_token_signing_alg_values_supported"] == ["RS256", "HS256"]
+
+    def test_get_connect_discovery_info_signing_algorithms_fall_back_when_no_applications(self):
+        assert get_application_model().objects.count() == 0
+        response = self.client.get(reverse("oauth2_provider:oidc-connect-discovery-info"))
+        self.assertEqual(response.status_code, 200)
+        assert response.json()["id_token_signing_alg_values_supported"] == ["RS256", "HS256"]
+
+    def test_get_connect_discovery_info_signing_algorithms_filtered_by_server_support(self):
+        # An Application configured with RS256 must not cause RS256 to be
+        # advertised when the server has no RSA key configured.
+        Application = get_application_model()
+        self._create_application("RS256 App", Application.RS256_ALGORITHM)
         self.oauth2_settings.OIDC_RSA_PRIVATE_KEY = None
         response = self.client.get(reverse("oauth2_provider:oidc-connect-discovery-info"))
         self.assertEqual(response.status_code, 200)
@@ -566,6 +609,39 @@ def test_userinfo_endpoint_bad_token(oidc_tokens, client):
 
 
 @pytest.mark.django_db(databases="__all__")
+def test_userinfo_endpoint_token_matches_session_user(oidc_tokens, logged_in_client):
+    auth_header = "Bearer %s" % oidc_tokens.access_token
+    rsp = logged_in_client.get(
+        reverse("oauth2_provider:user-info"),
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    assert rsp.status_code == 200
+    data = rsp.json()
+    assert data["sub"] == str(oidc_tokens.user.pk)
+
+
+@pytest.mark.django_db(databases="__all__")
+def test_userinfo_endpoint_token_belongs_to_other_user(oidc_tokens, other_user, client):
+    # The session belongs to other_user but the access token was issued to
+    # oidc_tokens.user: the request must be rejected.
+    client.force_login(other_user)
+    auth_header = "Bearer %s" % oidc_tokens.access_token
+    rsp = client.get(
+        reverse("oauth2_provider:user-info"),
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    assert rsp.status_code == 403
+    assert rsp.json()["error"] == "access_denied"
+
+    rsp = client.post(
+        reverse("oauth2_provider:user-info"),
+        data={"access_token": oidc_tokens.access_token},
+    )
+    assert rsp.status_code == 403
+    assert rsp.json()["error"] == "access_denied"
+
+
+@pytest.mark.django_db(databases="__all__")
 def test_token_deletion_on_logout(oidc_tokens, logged_in_client, rp_settings):
     AccessToken = get_access_token_model()
     IDToken = get_id_token_model()
@@ -788,3 +864,29 @@ def test_userinfo_endpoint_custom_claims_email_scopeplain(oidc_email_scope_token
 
     assert "email" in data
     assert data["email"] == EXAMPLE_EMAIL
+
+
+@pytest.mark.django_db(databases="__all__")
+def test_userinfo_endpoint_custom_claims_none_values_are_omitted(oidc_tokens, client, oauth2_settings):
+    class CustomValidator(OAuth2Validator):
+        oidc_claim_scope = None
+
+        def get_additional_claims(self, request):
+            return {
+                "email": None,
+                "profile": None,
+                "nickname": "tester",
+            }
+
+    oidc_tokens.oauth2_settings.OAUTH2_VALIDATOR_CLASS = CustomValidator
+    auth_header = "Bearer %s" % oidc_tokens.access_token
+    rsp = client.get(
+        reverse("oauth2_provider:user-info"),
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    assert rsp.status_code == 200
+    data = rsp.json()
+    assert "sub" in data
+    assert "email" not in data
+    assert "profile" not in data
+    assert data["nickname"] == "tester"

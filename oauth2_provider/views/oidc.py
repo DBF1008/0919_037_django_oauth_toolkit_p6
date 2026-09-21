@@ -74,9 +74,7 @@ class ConnectDiscoveryInfoView(OIDCOnlyMixin, View):
             if oauth2_settings.OIDC_RP_INITIATED_LOGOUT_ENABLED:
                 end_session_endpoint = "{}{}".format(host, reverse("oauth2_provider:rp-initiated-logout"))
 
-        signing_algorithms = [Application.HS256_ALGORITHM]
-        if oauth2_settings.OIDC_RSA_PRIVATE_KEY:
-            signing_algorithms = [Application.RS256_ALGORITHM, Application.HS256_ALGORITHM]
+        signing_algorithms = self._get_id_token_signing_algorithms()
 
         validator_class = oauth2_settings.OAUTH2_VALIDATOR_CLASS
         validator = validator_class()
@@ -106,6 +104,27 @@ class ConnectDiscoveryInfoView(OIDCOnlyMixin, View):
         response = JsonResponse(data)
         response["Access-Control-Allow-Origin"] = "*"
         return response
+
+    @staticmethod
+    def _get_id_token_signing_algorithms():
+        """
+        Return the ID Token signing algorithms to advertise in the discovery
+        document.
+
+        Only algorithms that are both supported by the server configuration
+        and actually configured on at least one Application are advertised,
+        so that the discovery metadata stays consistent with the algorithms
+        used to sign ID Tokens. When no Application exists yet, all
+        server-supported algorithms are advertised.
+        """
+        supported_algorithms = [Application.HS256_ALGORITHM]
+        if oauth2_settings.OIDC_RSA_PRIVATE_KEY:
+            supported_algorithms.insert(0, Application.RS256_ALGORITHM)
+        configured_algorithms = set(
+            Application.objects.order_by().values_list("algorithm", flat=True).distinct()
+        )
+        signing_algorithms = [alg for alg in supported_algorithms if alg in configured_algorithms]
+        return signing_algorithms or supported_algorithms
 
 
 @method_decorator(login_not_required, name="dispatch")
@@ -150,12 +169,58 @@ class UserInfoView(OIDCOnlyMixin, OAuthLibMixin, View):
         return self._create_userinfo_response(request)
 
     def _create_userinfo_response(self, request):
+        if not self._access_token_matches_request_user(request):
+            # The request carries an authenticated session for a different
+            # user than the one the access token was issued to. Refuse to
+            # serve claims to avoid leaking another user's information.
+            return JsonResponse(
+                {
+                    "error": "access_denied",
+                    "error_description": "The access token does not belong to the current user.",
+                },
+                status=403,
+            )
         url, headers, body, status = self.create_userinfo_response(request)
         response = HttpResponse(content=body or "", status=status)
 
         for k, v in headers.items():
             response[k] = v
         return response
+
+    @staticmethod
+    def _get_request_access_token(request):
+        """
+        Extract the access token from the Authorization header or, for POST
+        requests, from the form-encoded body, as per RFC 6750.
+        """
+        authorization = request.META.get("HTTP_AUTHORIZATION", "")
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer" and token:
+            return token
+        if request.method == "POST":
+            return request.POST.get("access_token")
+        return None
+
+    def _access_token_matches_request_user(self, request):
+        """
+        Verify that the access token belongs to the user authenticated in the
+        current session, if any. Requests without an authenticated session
+        user are left to the regular bearer token validation.
+        """
+        user = getattr(request, "user", None)
+        if user is None or not user.is_authenticated:
+            return True
+        token = self._get_request_access_token(request)
+        if not token:
+            # No token supplied: let oauthlib respond with an error.
+            return True
+        AccessToken = get_access_token_model()
+        try:
+            access_token = AccessToken.objects.get(token=token)
+        except AccessToken.DoesNotExist:
+            # Unknown token: let oauthlib respond with invalid_token.
+            return True
+        return access_token.user_id is not None and access_token.user_id == user.pk
 
 
 def _load_id_token(token):

@@ -666,6 +666,32 @@ def test_get_id_token_dictionary_auth_time_naive_last_login_is_utc(oauth2_settin
 
 
 @pytest.mark.oauth2_settings(presets.OIDC_SETTINGS_RW)
+def test_get_oidc_claims_omits_none_valued_claims(oauth2_settings, rf):
+    class CustomValidator(OAuth2Validator):
+        oidc_claim_scope = None
+
+        def get_additional_claims(self, request):
+            return {
+                "email": None,
+                "profile": None,
+                "nickname": "tester",
+            }
+
+    validator = CustomValidator()
+    django_request = rf.get("/")
+    request = Request("/", headers=django_request.META)
+    request.scopes = ["openid", "email", "profile"]
+    request.user = mock.MagicMock(pk=1)
+
+    claims = validator.get_oidc_claims(None, None, request)
+
+    assert claims["sub"] == "1"
+    assert "email" not in claims
+    assert "profile" not in claims
+    assert claims["nickname"] == "tester"
+
+
+@pytest.mark.oauth2_settings(presets.OIDC_SETTINGS_RW)
 def test_get_id_token_dictionary_auth_time_last_login_none_falls_back_to_now(oauth2_settings, rf):
     validator = OAuth2Validator()
     django_request = rf.get("/")

@@ -885,7 +885,14 @@ class OAuth2Validator(RequestValidator):
 
         for k, v in data.items():
             if not self.oidc_claim_scope or self.oidc_claim_scope.get(k) in request.scopes:
-                claims[k] = v(request) if callable(v) else v
+                value = v(request) if callable(v) else v
+                # Claims with a None value (e.g. an empty email or profile
+                # field) are omitted rather than serialized as null. This
+                # keeps the JWT serializable and follows OpenID Connect Core
+                # 1.0 section 5.1, which recommends omitting Claims that are
+                # not available instead of returning them with a null value.
+                if value is not None:
+                    claims[k] = value
         return claims
 
     def get_id_token_dictionary(self, token, token_handler, request):
